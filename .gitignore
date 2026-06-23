@@ -4,3 +4,6 @@ __pycache__/
 *.xlsx
 *.json
 
+
+streamlit_secrets.toml
+_make_secrets.py

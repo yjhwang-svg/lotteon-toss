@@ -12,8 +12,8 @@ var SOURCE_SHEET = "토스update";
 var TARGET_SHEET = "토스업로드";
 var SLACK_WEBHOOK_URL = "https://hooks.slack.com/triggers/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";
 var SLACK_EMAIL = "x-aaaatxo5yffjiqwaynov33b5re@madupteam.slack.com";  // 폴백용
-// Streamlit Cloud 배포 후 아래 URL 교체
-var STREAMLIT_URL = "https://toss-update-bot.streamlit.app";
+// Streamlit Cloud 배포 URL
+var STREAMLIT_URL = "https://lotteon-toss-update.streamlit.app";
 
 // ── 비용 계산 (클릭 기반 구간별) ───────────────────
 function calcCost(clicks) {
