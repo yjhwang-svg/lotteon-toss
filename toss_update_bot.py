@@ -20,6 +20,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, date as Date
@@ -156,7 +157,13 @@ def calc_cost(clicks: int) -> int:
 
 # ── gspread ───────────────────────────────────────────────────────────────────
 def _client() -> gspread.Client:
-    creds = Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
+    """서비스 계정 인증. 우선순위: 환경변수 GCP_SA_JSON(JSON 문자열) → 로컬 파일."""
+    sa_json = os.environ.get("GCP_SA_JSON")
+    if sa_json:
+        info = json.loads(sa_json)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    else:
+        creds = Credentials.from_service_account_file(SA_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -438,6 +445,53 @@ def update_sheet(
     return len(to_delete)
 
 
+# ── 파이프라인 (대시보드·워커 공유) ──────────────────────────────────────────
+def run_pipeline(start: Date, end: Date, use_toss: bool, client=None, log=print) -> dict:
+    """소스 읽기 → 비용 계산 → (옵션) 예외 로직 → 시트 업데이트.
+
+    Args:
+        start, end: 대상 날짜 범위
+        use_toss:   True면 토스 대시보드 스크래핑 + 집행완료 예외 로직 적용
+        client:     gspread 클라이언트 (없으면 자동 생성)
+        log:        진행 로그 콜백 (기본 print)
+    """
+    if client is None:
+        client = _client()
+
+    target_dates = _date_range(start, end)
+
+    log(f"📥 토스update 시트 읽는 중... ({start} ~ {end})")
+    sh = client.open_by_key(SPREADSHEET_ID)
+    all_rows = sh.worksheet(SOURCE_SHEET).get_all_values()
+    header, source_rows = all_rows[1], all_rows[2:]
+    log("✅ 토스update 시트 로드")
+
+    rows = calculate_rows(header, source_rows, target_dates)
+    default_count = len(target_dates)
+    log(f"📊 기본 계산: 기본행 {default_count}개 + 소재행 {len(rows) - default_count}개")
+
+    if use_toss:
+        log("🔍 토스 대시보드 스크래핑 중...")
+        campaigns = scrape_dashboard()
+        if not campaigns:
+            raise RuntimeError("캠페인 데이터가 없습니다. 토스 광고 플랫폼에 로그인되어 있는지 확인해주세요.")
+        log(f"✅ 캠페인 {len(campaigns)}개 수집")
+        mapping = load_mapping(client)
+        log(f"✅ 매핑 {len(mapping)}개 로드")
+        rows = apply_exception_costs(rows, campaigns, mapping, header, source_rows, target_dates)
+        log("✅ 집행완료 예외 로직 적용")
+
+    deleted = update_sheet(client, rows, target_dates)
+    log("✅ 날짜 오름차순 정렬 완료")
+
+    return {
+        "sojaebang": [r for r in rows if r[4] != "없음"],
+        "deleted": deleted,
+        "dates": [d.strftime("%Y-%m-%d") for d in target_dates],
+        "used_toss": use_toss,
+    }
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="토스 시트 자동 업데이트 봇")
@@ -457,6 +511,7 @@ def main():
     else:
         target_dates = [(datetime.now() - timedelta(days=1)).date()]
 
+    start, end = target_dates[0], target_dates[-1]
     date_strs = [d.strftime("%Y-%m-%d") for d in target_dates]
     print(f"[토스봇] 대상 날짜: {date_strs[0]} ~ {date_strs[-1]} ({len(target_dates)}일)")
 
@@ -472,30 +527,8 @@ def main():
             print("[토스봇] --force 옵션으로 재수집 가능")
             sys.exit(0)
 
-    print("[토스봇] 토스update 시트 읽는 중...")
-    sh = client.open_by_key(SPREADSHEET_ID)
-    all_rows = sh.worksheet(SOURCE_SHEET).get_all_values()
-    header, source_rows = all_rows[1], all_rows[2:]
-
-    rows = calculate_rows(header, source_rows, target_dates)
-
-    if args.toss:
-        campaigns = scrape_dashboard()
-        if campaigns:
-            mapping = load_mapping(client)
-            rows = apply_exception_costs(rows, campaigns, mapping, header, source_rows, target_dates)
-            print("[토스봇] 예외 로직 적용 완료")
-
-    default_count = len(target_dates)
-    print(f"[토스봇] 생성: 기본행 {default_count}개 + 소재행 {len(rows) - default_count}개")
-
-    update_sheet(client, rows, target_dates)
-
-    print("\n[토스봇] 완료!")
-    for r in rows[:10]:
-        print(f"  {r}")
-    if len(rows) > 10:
-        print(f"  ... 외 {len(rows) - 10}개")
+    result = run_pipeline(start, end, args.toss, client=client)
+    print(f"\n[토스봇] 완료! 소재행 {len(result['sojaebang'])}개")
 
 
 if __name__ == "__main__":

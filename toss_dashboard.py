@@ -72,28 +72,42 @@ st.markdown("""
   .result-channel { color: #4E5968; }
   .result-cost { font-weight: 700; color: #0064FF; }
 
-  /* 일반 재수집 버튼 */
-  div[data-testid="stButton"]:nth-of-type(1) > button {
-    background: #0064FF; color: white; border: none;
-    border-radius: 12px; padding: 18px 32px; font-size: 16px;
-    font-weight: 700; width: 100%; min-height: 56px; line-height: 1.4;
-    transition: background .15s;
-  }
-  div[data-testid="stButton"]:nth-of-type(1) > button:hover { background: #0052CC; }
-
-  /* 토스 대시보드 재수집 버튼 */
-  div[data-testid="stButton"]:nth-of-type(2) > button {
-    background: white; color: #0064FF;
-    border: 2px solid #0064FF;
-    border-radius: 12px; padding: 18px 32px; font-size: 16px;
-    font-weight: 700; width: 100%; min-height: 56px; line-height: 1.4;
-    transition: all .15s;
-  }
-  div[data-testid="stButton"]:nth-of-type(2) > button:hover {
-    background: #E8F3FF;
+  /* 버튼 공통 기본 */
+  div.stButton > button {
+    border: none !important;
+    border-radius: 12px !important;
+    padding: 18px 24px !important;
+    font-size: 16px !important;
+    font-weight: 700 !important;
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    width: 100% !important;
+    min-height: 56px !important;
+    line-height: 1.4 !important;
+    transition: background .15s, opacity .15s !important;
+    color: white !important;
   }
 
-  div.stButton > button:disabled { background: #C2D3F0 !important; border: none !important; color: white !important; cursor: not-allowed; }
+  /* 첫 번째 컬럼 = 일반 재수집 — 파란색 */
+  div[data-testid="column"]:nth-of-type(1) div.stButton > button {
+    background: #0064FF !important;
+  }
+  div[data-testid="column"]:nth-of-type(1) div.stButton > button:hover {
+    background: #0052CC !important;
+  }
+
+  /* 두 번째 컬럼 = 토스 대시보드 재수집 — 다크 */
+  div[data-testid="column"]:nth-of-type(2) div.stButton > button {
+    background: #191F28 !important;
+  }
+  div[data-testid="column"]:nth-of-type(2) div.stButton > button:hover {
+    background: #2E3A4A !important;
+  }
+
+  div.stButton > button:disabled {
+    color: white !important;
+    cursor: not-allowed !important;
+    opacity: 0.5 !important;
+  }
 
   .block-container { padding-top: 2rem; max-width: 680px; }
   footer { display: none; }
@@ -112,79 +126,60 @@ for key in ["logs", "result", "error", "running"]:
     if key not in st.session_state:
         st.session_state[key] = [] if key == "logs" else (False if key == "running" else None)
 
+# ── 인증 부트스트랩: Streamlit secrets → 환경변수 ─────────────────────────────
+import os
+import json as _json
+
+if "gcp_service_account" in st.secrets:
+    os.environ["GCP_SA_JSON"] = _json.dumps(dict(st.secrets["gcp_service_account"]))
+
 # ── import ────────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(_HERE))
-from toss_update_bot import (
-    _client, _date_range, calculate_rows, apply_exception_costs,
-    load_mapping, scrape_dashboard,
-    SOURCE_SHEET, SPREADSHEET_ID as _SID,
-)
-import gspread
+from toss_update_bot import _client, run_pipeline, SPREADSHEET_ID as _SID
+from toss_queue import enqueue, get_job
+
+POLL_TIMEOUT  = 300  # 토스 작업 최대 대기 (초)
+POLL_INTERVAL = 5    # 큐 확인 주기 (초)
 
 
-def run_update(start: date, end: date, use_toss: bool) -> dict:
-    target_dates = _date_range(start, end)
-    date_strs = [d.strftime("%Y-%m-%d") for d in target_dates]
+def run_general(start: date, end: date) -> dict:
+    """일반 재수집 — 클라우드/로컬 어디서나 직접 실행."""
     logs = []
+    result = run_pipeline(start, end, use_toss=False, log=logs.append)
+    result["logs"] = logs
+    return result
 
-    def log(msg): logs.append(msg)
 
-    log(f"📥 토스update 시트 읽는 중... ({start} ~ {end})")
+def run_toss_via_queue(start: date, end: date) -> dict:
+    """토스 재수집 — 큐에 작업 등록 후 워커 완료를 폴링."""
+    import time
+    logs = []
     client = _client()
     sh = client.open_by_key(SPREADSHEET_ID)
-    all_rows = sh.worksheet(SOURCE_SHEET).get_all_values()
-    header, source_rows = all_rows[1], all_rows[2:]
-    log("✅ 토스update 시트 로드")
 
-    rows = calculate_rows(header, source_rows, target_dates)
-    default_count = len(target_dates)
-    log(f"📊 기본 계산: 기본행 {default_count}개 + 소재행 {len(rows) - default_count}개")
+    s_str, e_str = start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    job_id = enqueue(sh, s_str, e_str, mode="toss")
+    logs.append(f"📤 작업 요청 등록 (ID: {job_id})")
+    logs.append("⏳ 사무실 워커가 토스 대시보드를 수집 중입니다...")
 
-    if use_toss:
-        log("🔍 토스 대시보드 스크래핑 중...")
-        campaigns = scrape_dashboard()
-        if not campaigns:
-            raise RuntimeError("캠페인 데이터가 없습니다. 토스 광고 플랫폼에 로그인되어 있는지 확인해주세요.")
-        log(f"✅ 캠페인 {len(campaigns)}개 수집")
-        mapping = load_mapping(client)
-        log(f"✅ 매핑 {len(mapping)}개 로드")
-        rows = apply_exception_costs(rows, campaigns, mapping, header, source_rows, target_dates)
-        log("✅ 집행완료 예외 로직 적용")
+    waited = 0
+    while waited < POLL_TIMEOUT:
+        time.sleep(POLL_INTERVAL)
+        waited += POLL_INTERVAL
+        job = get_job(sh, job_id)
+        if not job:
+            continue
+        if job["status"] == "done":
+            logs.append(f"✅ {job['message']}")
+            return {"logs": logs, "sojaebang": [], "deleted": 0,
+                    "dates": [s_str] if s_str == e_str else [s_str, e_str],
+                    "used_toss": True, "queued": True}
+        if job["status"] == "error":
+            raise RuntimeError(f"워커 오류: {job['message']}")
 
-    # 시트 업데이트
-    ws = sh.worksheet(TARGET_SHEET)
-    target_strs = set(date_strs)
-    all_data = ws.get_all_values()
-
-    to_delete = [i + 1 for i, row in enumerate(all_data) if row and row[0] in target_strs]
-    for idx in sorted(to_delete, reverse=True):
-        ws.delete_rows(idx)
-    log(f"🗑️ 기존 {len(to_delete)}개 행 삭제")
-
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-        log(f"➕ {len(rows)}개 행 추가")
-
-    total_rows = len(ws.get_all_values())
-    sh.batch_update({"requests": [{"sortRange": {
-        "range": {
-            "sheetId": ws.id,
-            "startRowIndex": 1,
-            "endRowIndex": total_rows,
-            "startColumnIndex": 0,
-            "endColumnIndex": 8,
-        },
-        "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}],
-    }}]})
-    log("✅ 날짜 오름차순 정렬 완료")
-
-    return {
-        "logs": logs,
-        "sojaebang": [r for r in rows if r[4] != "없음"],
-        "deleted": len(to_delete),
-        "dates": date_strs,
-        "used_toss": use_toss,
-    }
+    raise RuntimeError(
+        "워커 응답 시간 초과. 사무실 PC에서 워커(toss_worker.py)가 실행 중인지 확인해주세요."
+    )
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -196,7 +191,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 날짜 선택
-st.markdown('<div class="toss-card"><div class="toss-card-title">📅 업데이트 기간 설정</div>', unsafe_allow_html=True)
+st.markdown(
+    '<p style="font-size:18px;font-weight:700;color:#191F28;margin:8px 0 16px;">'
+    '📅 업데이트 기간 설정</p>',
+    unsafe_allow_html=True
+)
 
 yesterday = date.today() - timedelta(days=1)
 col1, col2 = st.columns(2)
@@ -211,14 +210,17 @@ if start_date > end_date:
 
 days_count = (end_date - start_date).days + 1
 st.markdown(
-    f'<p style="font-size:13px;color:#6B7684;margin-top:4px;">'
+    f'<p style="font-size:13px;color:#6B7684;margin-top:4px;margin-bottom:24px;">'
     f'선택 기간: <b style="color:#0064FF">{days_count}일</b> ({start_date} ~ {end_date})</p>',
     unsafe_allow_html=True
 )
-st.markdown('</div>', unsafe_allow_html=True)
 
 # 버튼 영역
-st.markdown('<div class="toss-card"><div class="toss-card-title">🔄 재수집 방식 선택</div>', unsafe_allow_html=True)
+st.markdown(
+    '<p style="font-size:18px;font-weight:700;color:#191F28;margin:8px 0 16px;">'
+    '🔄 재수집 방식 선택</p>',
+    unsafe_allow_html=True
+)
 
 col_a, col_b = st.columns(2)
 with col_a:
@@ -226,21 +228,22 @@ with col_a:
         "일반 재수집",
         disabled=st.session_state.running,
         help="클릭 기반 구간 비용으로 재업로드 (토스 로그인 불필요)",
+        use_container_width=True,
     )
 with col_b:
     btn_toss = st.button(
         "토스 대시보드 재수집",
         disabled=st.session_state.running,
         help="토스 대시보드 스크래핑 후 집행완료 예외 비용 적용 (Chrome 로그인 필요)",
+        use_container_width=True,
     )
 
 st.markdown(
-    '<p style="font-size:12px;color:#B0B8C1;margin-top:8px;">'
-    '💡 일반 재수집: 클릭 &lt; 10,000 → 클릭×10원 / 이상 → 만 단위×10만원<br>'
-    '💡 토스 대시보드 재수집: 집행완료+집행비용&lt;예상비용인 경우 실제 집행비용으로 보정</p>',
+    '<p style="font-size:12px;color:#B0B8C1;margin-top:8px;margin-bottom:16px;line-height:1.9;">'
+    '💡 <b>일반</b>: 클릭 &lt; 10,000 → 클릭×10원 / 이상 → 만 단위×10만원<br>'
+    '💡 <b>토스</b>: 집행완료 + 집행비용 &lt; 예상비용인 경우 실제 집행비용으로 보정</p>',
     unsafe_allow_html=True
 )
-st.markdown('</div>', unsafe_allow_html=True)
 
 # 버튼 클릭 처리
 use_toss = None
@@ -255,8 +258,13 @@ if use_toss is not None and not st.session_state.running:
     st.session_state.result  = None
     st.session_state.error   = None
 
+    spinner_msg = "토스 대시보드 수집 요청 중..." if use_toss else "재수집 중..."
     try:
-        result = run_update(start_date, end_date, use_toss)
+        with st.spinner(spinner_msg):
+            if use_toss:
+                result = run_toss_via_queue(start_date, end_date)
+            else:
+                result = run_general(start_date, end_date)
         st.session_state.result = result
         st.session_state.logs   = result["logs"]
     except Exception as e:
@@ -289,27 +297,40 @@ if st.session_state.error:
 if st.session_state.result:
     r = st.session_state.result
     sojaebang = r["sojaebang"]
+    queued = r.get("queued", False)
     mode_label = "토스 대시보드 재수집" if r["used_toss"] else "일반 재수집"
 
-    st.markdown(
-        f'<div class="toss-card">'
-        f'<div class="toss-card-title">✅ {mode_label} 완료</div>'
-        f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;">'
-        f'  <div style="flex:1;background:#E8F3FF;border-radius:12px;padding:16px;text-align:center;">'
-        f'    <div style="font-size:24px;font-weight:800;color:#0064FF">{len(sojaebang)}</div>'
-        f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">소재행</div>'
-        f'  </div>'
-        f'  <div style="flex:1;background:#F3FFF3;border-radius:12px;padding:16px;text-align:center;">'
-        f'    <div style="font-size:24px;font-weight:800;color:#00B761">{r["deleted"]}</div>'
-        f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">삭제된 행</div>'
-        f'  </div>'
-        f'  <div style="flex:1;background:#FFF8E1;border-radius:12px;padding:16px;text-align:center;">'
-        f'    <div style="font-size:24px;font-weight:800;color:#F59E0B">{len(r["dates"])}</div>'
-        f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">업데이트 일수</div>'
-        f'  </div>'
-        f'</div>',
-        unsafe_allow_html=True
-    )
+    if queued:
+        # 토스(큐) 작업 — 워커가 처리, 상세 행은 시트에서 확인
+        st.markdown(
+            f'<div class="toss-card">'
+            f'<div class="toss-card-title">✅ {mode_label} 완료</div>'
+            f'<p style="font-size:14px;color:#4E5968;margin:0;">'
+            f'사무실 워커가 토스 대시보드를 수집하고 시트를 업데이트했습니다.<br>'
+            f'상세 결과는 아래 버튼으로 시트에서 확인하세요.</p>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            f'<div class="toss-card">'
+            f'<div class="toss-card-title">✅ {mode_label} 완료</div>'
+            f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;">'
+            f'  <div style="flex:1;background:#E8F3FF;border-radius:12px;padding:16px;text-align:center;">'
+            f'    <div style="font-size:24px;font-weight:800;color:#0064FF">{len(sojaebang)}</div>'
+            f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">소재행</div>'
+            f'  </div>'
+            f'  <div style="flex:1;background:#F3FFF3;border-radius:12px;padding:16px;text-align:center;">'
+            f'    <div style="font-size:24px;font-weight:800;color:#00B761">{r["deleted"]}</div>'
+            f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">삭제된 행</div>'
+            f'  </div>'
+            f'  <div style="flex:1;background:#FFF8E1;border-radius:12px;padding:16px;text-align:center;">'
+            f'    <div style="font-size:24px;font-weight:800;color:#F59E0B">{len(r["dates"])}</div>'
+            f'    <div style="font-size:12px;color:#6B7684;margin-top:2px;">업데이트 일수</div>'
+            f'  </div>'
+            f'</div></div>',
+            unsafe_allow_html=True
+        )
 
     if sojaebang:
         rows_html = ""
@@ -327,17 +348,15 @@ if st.session_state.result:
                 f'</div>'
             )
         st.markdown(
-            f'<div style="border:1px solid #F2F4F6;border-radius:12px;padding:4px 16px;">{rows_html}</div>',
+            f'<div style="border:1px solid #F2F4F6;border-radius:12px;padding:4px 16px;margin-bottom:16px;">{rows_html}</div>',
             unsafe_allow_html=True
         )
 
     st.markdown(
-        f'<div style="text-align:center;margin-top:20px;">'
+        f'<div style="text-align:center;margin-top:8px;">'
         f'<a href="{SHEET_URL}" target="_blank" style="'
         f'display:inline-block;background:#0064FF;color:white;text-decoration:none;'
         f'border-radius:12px;padding:12px 28px;font-size:15px;font-weight:700;">'
         f'📊 시트에서 확인하기</a></div>',
         unsafe_allow_html=True
     )
-
-    st.markdown('</div>', unsafe_allow_html=True)
