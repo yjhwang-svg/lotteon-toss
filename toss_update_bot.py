@@ -288,12 +288,26 @@ def apply_exception_costs(
         if len(r) >= 5:
             row_index[(r[0], r[4])] = i
 
+    # 같은 (캠페인명, 기간)이 여러 줄로 뜨면 집행비용 합산 (분할 정산 통합)
+    agg: dict[tuple[str, str], dict] = {}
     for camp in campaigns:
-        # 집행완료이고 집행비용 < 예상비용인 것만
         if "완료" not in camp.get("status", ""):
             continue
-        expected = _parse_cost(camp.get("expected_cost", "0"))
-        actual   = _parse_cost(camp.get("actual_cost", "0"))
+        key = (camp["campaign_name"], camp.get("period", ""))
+        a = _parse_cost(camp.get("actual_cost", "0"))
+        e = _parse_cost(camp.get("expected_cost", "0"))
+        if key not in agg:
+            agg[key] = {"campaign_name": camp["campaign_name"],
+                        "period": camp.get("period", ""),
+                        "actual": a, "expected": e}
+        else:
+            agg[key]["actual"] += a
+            agg[key]["expected"] = max(agg[key]["expected"], e)
+
+    for camp in agg.values():
+        expected = camp["expected"]
+        actual   = camp["actual"]
+        # 집행비용이 0이거나 예상비용 이상이면 보정 불필요 (기본 공식 유지)
         if actual <= 0 or actual >= expected:
             continue
 
@@ -313,111 +327,92 @@ def apply_exception_costs(
         if not overlap:
             continue
 
-        # 이 상품의 소스 행 (채널상세 A열)
+        # 이 상품의 소스 행 (채널상세 A열). 채널명이 중복될 수 있어 채널 단위로 정리.
         product_rows = [r for r in source_rows if len(r) > 1 and r[1].strip() == product]
         if not product_rows:
             continue
 
-        if len(period_dates) == 1:
-            # 단일일: 해당 날짜 모든 채널 비용 → actual 분배
-            d_str = period_dates[0].strftime("%Y-%m-%d")
-            col_i = date_col.get(d_str)
-            if col_i is None:
-                continue
+        # 고유 채널 목록 (등장 순서 유지)
+        channels = []
+        seen_ch = set()
+        for r in product_rows:
+            ch = r[0].strip()
+            if ch and ch not in seen_ch:
+                seen_ch.add(ch)
+                channels.append(ch)
 
-            # 해당 날짜 활성 채널들
-            active = []
+        def clicks_on(ch: str, d_str: str) -> int:
+            """채널·날짜의 클릭 합 (동일 채널 소스행이 여러 개여도 한 번만 합산)."""
+            col = date_col.get(d_str)
+            if col is None:
+                return 0
+            total = 0
             for r in product_rows:
-                ch = r[0].strip()
-                if not ch:
+                if r[0].strip() != ch:
                     continue
-                raw = r[col_i].replace(",", "").strip() if col_i < len(r) else ""
-                if raw.isdigit() and int(raw) > 0:
-                    active.append((ch, int(raw)))
+                raw = r[col].replace(",", "").strip() if col < len(r) else ""
+                if raw.isdigit():
+                    total += int(raw)
+            return total
 
-            if not active:
-                continue
+        def active_on(d_str: str) -> list[tuple[str, int]]:
+            out = []
+            for ch in channels:
+                clk = clicks_on(ch, d_str)
+                if clk > 0:
+                    out.append((ch, clk))
+            return out
 
-            # 단일 채널이면 그대로, 여러 채널이면 클릭 비율로 분배
+        def distribute(d_str: str, amount: int, active: list[tuple[str, int]]):
+            """amount를 active 채널에 클릭 비율로 분배해 rows에 기록 (음수 방지)."""
             total_clicks = sum(c for _, c in active)
-            remaining = actual
-            for idx, (ch, clicks) in enumerate(active):
+            if total_clicks <= 0:
+                return
+            rem = amount
+            for idx, (ch, clk) in enumerate(active):
                 key = (d_str, ch)
                 if key not in row_index:
                     continue
                 if idx == len(active) - 1:
-                    cost = remaining
+                    cost = rem
                 else:
-                    cost = round(actual * clicks / total_clicks)
-                    remaining -= cost
-                rows[row_index[key]][7] = str(cost)
+                    cost = round(amount * clk / total_clicks)
+                    rem -= cost
+                rows[row_index[key]][7] = str(max(0, cost))
+
+        if len(period_dates) == 1:
+            # 단일일: 그 날짜 비용을 집행비용(actual)으로 교체
+            d_str = period_dates[0].strftime("%Y-%m-%d")
+            active = active_on(d_str)
+            if active:
+                distribute(d_str, actual, active)
 
         else:
-            # 기간: 마지막 날 제외 → 기본 공식 유지, 마지막 날 = actual - 앞 날 합계
-            last_day = period_dates[-1]
-            last_d_str = last_day.strftime("%Y-%m-%d")
+            # 기간: 마지막 날 제외 기본 공식 유지, 마지막 날 = actual - 앞 날 합계
+            last_d_str = period_dates[-1].strftime("%Y-%m-%d")
 
-            # 마지막 날 제외 날짜들의 비용 합산
             cost_sum = 0
             for d in period_dates[:-1]:
                 d_str = d.strftime("%Y-%m-%d")
-                if d_str not in target_date_strs:
-                    # 업데이트 범위 밖이면 기본 공식으로 합산
-                    col_i = date_col.get(d_str)
-                    if col_i is None:
-                        continue
-                    for r in product_rows:
-                        ch = r[0].strip()
-                        if not ch:
-                            continue
-                        raw = r[col_i].replace(",", "").strip() if col_i < len(r) else ""
-                        if raw.isdigit() and int(raw) > 0:
-                            cost_sum += calc_cost(int(raw))
-                else:
-                    # 업데이트 범위 내 → rows에 이미 들어간 값 그대로 사용
-                    for r in product_rows:
-                        ch = r[0].strip()
-                        if not ch:
-                            continue
+                for ch in channels:
+                    if d_str in target_date_strs:
                         key = (d_str, ch)
                         if key in row_index:
                             try:
                                 cost_sum += int(rows[row_index[key]][7])
                             except (ValueError, IndexError):
                                 pass
+                    else:
+                        clk = clicks_on(ch, d_str)
+                        if clk > 0:
+                            cost_sum += calc_cost(clk)
 
-            remainder = actual - cost_sum
+            remainder = max(0, actual - cost_sum)  # 음수 방지
             if last_d_str not in target_date_strs:
                 continue
-
-            col_i = date_col.get(last_d_str)
-            if col_i is None:
-                continue
-
-            active = []
-            for r in product_rows:
-                ch = r[0].strip()
-                if not ch:
-                    continue
-                raw = r[col_i].replace(",", "").strip() if col_i < len(r) else ""
-                if raw.isdigit() and int(raw) > 0:
-                    active.append((ch, int(raw)))
-
-            if not active:
-                continue
-
-            total_clicks = sum(c for _, c in active)
-            rem = remainder
-            for idx, (ch, clicks) in enumerate(active):
-                key = (last_d_str, ch)
-                if key not in row_index:
-                    continue
-                if idx == len(active) - 1:
-                    cost = rem
-                else:
-                    cost = round(remainder * clicks / total_clicks)
-                    rem -= cost
-                rows[row_index[key]][7] = str(cost)
+            active = active_on(last_d_str)
+            if active:
+                distribute(last_d_str, remainder, active)
 
     return rows
 
