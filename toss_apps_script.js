@@ -16,11 +16,15 @@ var SLACK_EMAIL = "x-aaaatxo5yffjiqwaynov33b5re@madupteam.slack.com";  // 폴백
 var STREAMLIT_URL = "https://lotteon-toss-update.streamlit.app";
 
 // ── 비용 계산 (클릭 기반 구간별) ───────────────────
+// - 10,000 미만: 클릭 x 10
+// - 1만 단위 블록 안 나머지 < 5,000: (블록 수) x 100,000
+// - 나머지 >= 5,000: 클릭 x 10
 function calcCost(clicks) {
   var n = Number(clicks) || 0;
   if (n <= 0) return 0;
   if (n < 10000) return n * 10;
-  return Math.floor(n / 10000) * 100000;
+  if (n % 10000 < 5000) return Math.floor(n / 10000) * 100000;
+  return n * 10;
 }
 
 // ── 유틸 ──────────────────────────────────────────
