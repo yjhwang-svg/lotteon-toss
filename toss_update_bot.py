@@ -411,38 +411,48 @@ def update_sheet(
     new_rows: list[list[str]],
     target_dates: list[Date],
 ) -> int:
+    """기존 데이터에서 대상 날짜 행을 제거하고 새 행을 합쳐 한 번에 다시 쓴다.
+
+    행 단위 delete/append/sort API를 호출하지 않고 read 1 + clear 1 + write 1로
+    처리해 쓰기 할당량(분당 60건) 초과를 방지한다. 정렬은 파이썬에서 수행.
+    """
     sh = client.open_by_key(SPREADSHEET_ID)
     ws = sh.worksheet(TARGET_SHEET)
 
     target_strs = {d.strftime("%Y-%m-%d") for d in target_dates}
     all_data = ws.get_all_values()
 
-    to_delete = [
-        i + 1
-        for i, row in enumerate(all_data)
-        if row and row[0] in target_strs
-    ]
-    for idx in sorted(to_delete, reverse=True):
-        ws.delete_rows(idx)
-    print(f"[토스봇] 기존 {len(to_delete)}개 행 삭제")
+    header = all_data[0] if all_data else []
+    body   = all_data[1:] if len(all_data) > 1 else []
 
-    if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
-        print(f"[토스봇] {len(new_rows)}개 행 추가")
+    # 대상 날짜가 아닌 기존 행만 유지 (빈 행 제거)
+    kept = [r for r in body if r and r[0] and r[0] not in target_strs]
+    deleted = len([r for r in body if r and r[0] in target_strs])
 
-    total_rows = len(ws.get_all_values())
-    sh.batch_update({"requests": [{"sortRange": {
-        "range": {
-            "sheetId": ws.id,
-            "startRowIndex": 1,
-            "endRowIndex": total_rows,
-            "startColumnIndex": 0,
-            "endColumnIndex": 8,
-        },
-        "sortSpecs": [{"dimensionIndex": 0, "sortOrder": "ASCENDING"}],
-    }}]})
-    print("[토스봇] 날짜 오름차순 정렬 완료")
-    return len(to_delete)
+    # 합치고 날짜 오름차순 정렬 (YYYY-MM-DD 문자열은 사전순 == 날짜순)
+    combined = kept + new_rows
+    combined.sort(key=lambda r: r[0] if r else "")
+
+    old_last = len(all_data)  # 기존 데이터가 차지하던 마지막 행 번호
+
+    # 1) 기존 데이터 영역 비우기 (헤더 제외)
+    if old_last > 1:
+        ws.batch_clear([f"A2:H{old_last}"])
+
+    # 2) 정렬된 전체 본문을 한 번에 쓰기
+    if combined:
+        ws.update(
+            f"A2:H{len(combined) + 1}",
+            combined,
+            value_input_option="USER_ENTERED",
+        )
+        # 3) 서식 (한 번)
+        ws.format(f"A2:H{len(combined) + 1}", {
+            "textFormat": {"fontFamily": "Arial", "fontSize": 8}
+        })
+
+    print(f"[토스봇] 기존 {deleted}개 행 교체, 총 {len(combined)}개 행 기록")
+    return deleted
 
 
 # ── 파이프라인 (대시보드·워커 공유) ──────────────────────────────────────────
@@ -532,4 +542,8 @@ def main():
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     main()
