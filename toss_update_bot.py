@@ -94,8 +94,11 @@ def click_next():
     return false;
     """)
 
+seen = set()
+stale = 0
 for _ in range(50):
-    time.sleep(1.5)
+    time.sleep(0.8)
+    new_count = 0
     for row in read_rows():
         # [체크, 집행상태, 소재상태, 캠페인ID, 캠페인명, 소재수, 집행일시, 타입, 예상비용, 집행비용, ...]
         status   = row[1] if len(row) > 1 else ""
@@ -103,16 +106,30 @@ for _ in range(50):
         period   = row[6] if len(row) > 6 else ""
         expected = row[8] if len(row) > 8 else ""
         actual   = row[9] if len(row) > 9 else ""
-        if name and period:
-            all_campaigns.append({{
-                "campaign_name": name,
-                "period": period,
-                "status": status,
-                "expected_cost": expected,
-                "actual_cost": actual,
-            }})
+        if not (name and period):
+            continue
+        key = (name, period, expected, actual)
+        if key in seen:
+            continue
+        seen.add(key)
+        new_count += 1
+        all_campaigns.append({{
+            "campaign_name": name,
+            "period": period,
+            "status": status,
+            "expected_cost": expected,
+            "actual_cost": actual,
+        }})
+    # 다음 페이지 버튼이 없으면 종료
     if not click_next():
         break
+    # 새 행이 2회 연속 없으면 종료 (버튼 오탐지로 무한루프 방지)
+    if new_count == 0:
+        stale += 1
+        if stale >= 2:
+            break
+    else:
+        stale = 0
 
 with open(result_path, "w", encoding="utf-8") as f:
     json.dump(all_campaigns, f, ensure_ascii=False, indent=2)

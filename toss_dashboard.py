@@ -138,7 +138,7 @@ sys.path.insert(0, str(_HERE))
 from toss_update_bot import _client, run_pipeline, SPREADSHEET_ID as _SID
 from toss_queue import enqueue, get_job
 
-POLL_TIMEOUT  = 300  # 토스 작업 최대 대기 (초)
+POLL_TIMEOUT  = 600  # 토스 작업 최대 대기 (초)
 POLL_INTERVAL = 5    # 큐 확인 주기 (초)
 
 
