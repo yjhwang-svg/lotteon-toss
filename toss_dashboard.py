@@ -145,6 +145,14 @@ for key in ["logs", "result", "error", "running"]:
     if key not in st.session_state:
         st.session_state[key] = [] if key == "logs" else (False if key == "running" else None)
 
+# 결과 표시는 ?r=1 쿼리파라미터에 묶는다.
+# → 슬랙의 일반 링크(파라미터 없음)로 열면 항상 초기 입력 화면으로 시작.
+_show_results = "r" in st.query_params
+if not _show_results and not st.session_state.running:
+    st.session_state.result = None
+    st.session_state.logs   = []
+    st.session_state.error  = None
+
 # ── 인증 부트스트랩: Streamlit secrets → 환경변수 ─────────────────────────────
 import os
 import json as _json
@@ -302,6 +310,7 @@ if use_toss is not None and not st.session_state.running:
     finally:
         st.session_state.running = False
 
+    st.query_params["r"] = "1"  # 결과 표시 활성화 (새로고침/재방문 시엔 사라짐)
     st.rerun()
 
 # 로그
