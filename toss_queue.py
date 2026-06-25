@@ -14,6 +14,8 @@ Streamlit Cloud 대시보드가 작업을 enqueue하고,
     H: updated_at    — 갱신 시각
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 
 import gspread

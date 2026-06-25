@@ -4,6 +4,8 @@
     streamlit run toss_dashboard.py
 """
 
+from __future__ import annotations
+
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -130,8 +132,11 @@ for key in ["logs", "result", "error", "running"]:
 import os
 import json as _json
 
-if "gcp_service_account" in st.secrets:
-    os.environ["GCP_SA_JSON"] = _json.dumps(dict(st.secrets["gcp_service_account"]))
+try:
+    if "gcp_service_account" in st.secrets:
+        os.environ["GCP_SA_JSON"] = _json.dumps(dict(st.secrets["gcp_service_account"]))
+except Exception:
+    pass  # secrets 미설정 환경에서도 부팅되도록
 
 # ── import ────────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(_HERE))

@@ -18,6 +18,8 @@
     py toss_update_bot.py --date 2026-06-07 --force --toss  # 예외 로직 포함
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
