@@ -317,8 +317,9 @@ def apply_exception_costs(
     for camp in agg.values():
         expected = camp["expected"]
         actual   = camp["actual"]
-        # 집행비용이 0이거나 예상비용 이상이면 보정 불필요 (기본 공식 유지)
-        if actual <= 0 or actual >= expected:
+        # 집행완료 캠페인의 일별 합을 실제 집행비용에 맞춘다.
+        # 집행비용이 0이거나 예상비용과 같으면 보정 불필요 (구간 공식 그대로).
+        if actual <= 0 or actual == expected:
             continue
 
         cname = camp["campaign_name"]
@@ -337,92 +338,76 @@ def apply_exception_costs(
         if not overlap:
             continue
 
-        # 이 상품의 소스 행 (채널상세 A열). 채널명이 중복될 수 있어 채널 단위로 정리.
+        # 이 상품의 소스 행 (채널상세 A열). 같은 채널명이 같은 날 여러 행일 수 있음.
         product_rows = [r for r in source_rows if len(r) > 1 and r[1].strip() == product]
         if not product_rows:
             continue
+        product_channels = {r[0].strip() for r in product_rows if r[0].strip()}
 
-        # 고유 채널 목록 (등장 순서 유지)
-        channels = []
-        seen_ch = set()
-        for r in product_rows:
-            ch = r[0].strip()
-            if ch and ch not in seen_ch:
-                seen_ch.add(ch)
-                channels.append(ch)
+        def upload_idxs_on(d_str: str) -> list[int]:
+            """해당 날짜에 이 상품에 속하는 업로드 행 인덱스 (행 단위, 중복 포함)."""
+            return [i for i, rr in enumerate(rows)
+                    if len(rr) >= 7 and rr[0] == d_str and rr[4] in product_channels]
 
-        def clicks_on(ch: str, d_str: str) -> int:
-            """채널·날짜의 클릭 합 (동일 채널 소스행이 여러 개여도 한 번만 합산)."""
+        def source_cost_on(d_str: str) -> int:
+            """업데이트 범위 밖 날짜: 소스 클릭으로 구간 비용 합산."""
             col = date_col.get(d_str)
             if col is None:
                 return 0
             total = 0
             for r in product_rows:
-                if r[0].strip() != ch:
-                    continue
                 raw = r[col].replace(",", "").strip() if col < len(r) else ""
-                if raw.isdigit():
-                    total += int(raw)
+                if raw.isdigit() and int(raw) > 0:
+                    total += calc_cost(int(raw))
             return total
 
-        def active_on(d_str: str) -> list[tuple[str, int]]:
-            out = []
-            for ch in channels:
-                clk = clicks_on(ch, d_str)
-                if clk > 0:
-                    out.append((ch, clk))
-            return out
-
-        def distribute(d_str: str, amount: int, active: list[tuple[str, int]]):
-            """amount를 active 채널에 클릭 비율로 분배해 rows에 기록 (음수 방지)."""
-            total_clicks = sum(c for _, c in active)
+        def distribute(idxs: list[int], amount: int):
+            """amount를 업로드 행들에 클릭 비율로 분배해 기록 (음수 방지)."""
+            pairs = []
+            for i in idxs:
+                raw = rows[i][6].replace(",", "")
+                clk = int(raw) if raw.lstrip("-").isdigit() else 0
+                pairs.append((i, max(0, clk)))
+            total_clicks = sum(c for _, c in pairs)
             if total_clicks <= 0:
                 return
             rem = amount
-            for idx, (ch, clk) in enumerate(active):
-                key = (d_str, ch)
-                if key not in row_index:
-                    continue
-                if idx == len(active) - 1:
+            for k, (i, clk) in enumerate(pairs):
+                if k == len(pairs) - 1:
                     cost = rem
                 else:
                     cost = round(amount * clk / total_clicks)
                     rem -= cost
-                rows[row_index[key]][7] = str(max(0, cost))
+                rows[i][7] = str(max(0, cost))
+
+        period_strs = [d.strftime("%Y-%m-%d") for d in period_dates]
 
         if len(period_dates) == 1:
-            # 단일일: 그 날짜 비용을 집행비용(actual)으로 교체
-            d_str = period_dates[0].strftime("%Y-%m-%d")
-            active = active_on(d_str)
-            if active:
-                distribute(d_str, actual, active)
+            # 단일일: 그 날짜 모든 행 합을 집행비용(actual)으로 교체
+            idxs = upload_idxs_on(period_strs[0])
+            if idxs:
+                distribute(idxs, actual)
 
         else:
             # 기간: 마지막 날 제외 기본 공식 유지, 마지막 날 = actual - 앞 날 합계
-            last_d_str = period_dates[-1].strftime("%Y-%m-%d")
+            last_d_str = period_strs[-1]
 
             cost_sum = 0
-            for d in period_dates[:-1]:
-                d_str = d.strftime("%Y-%m-%d")
-                for ch in channels:
-                    if d_str in target_date_strs:
-                        key = (d_str, ch)
-                        if key in row_index:
-                            try:
-                                cost_sum += int(rows[row_index[key]][7])
-                            except (ValueError, IndexError):
-                                pass
-                    else:
-                        clk = clicks_on(ch, d_str)
-                        if clk > 0:
-                            cost_sum += calc_cost(clk)
+            for d_str in period_strs[:-1]:
+                if d_str in target_date_strs:
+                    for i in upload_idxs_on(d_str):
+                        raw = rows[i][7].replace(",", "")
+                        if raw.lstrip("-").isdigit():
+                            cost_sum += int(raw)
+                else:
+                    cost_sum += source_cost_on(d_str)
 
             remainder = max(0, actual - cost_sum)  # 음수 방지
             if last_d_str not in target_date_strs:
                 continue
-            active = active_on(last_d_str)
-            if active:
-                distribute(last_d_str, remainder, active)
+            idxs = upload_idxs_on(last_d_str)
+            if idxs:
+                distribute(idxs, remainder)
 
     return rows
 
