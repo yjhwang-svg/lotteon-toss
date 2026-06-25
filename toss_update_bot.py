@@ -285,18 +285,32 @@ def apply_exception_costs(
     source_rows: list[list[str]],
     target_dates: list[Date],
 ) -> list[list[str]]:
-    """집행완료이고 집행비용 < 예상비용인 캠페인의 비용을 보정."""
+    """집행완료 캠페인의 일별 비용 합을 실제 집행비용에 맞춘다.
+
+    한 상품에 캠페인이 여러 개(기간 겹침)일 수 있으므로, 각 캠페인을
+    '시작일이 캠페인 기간 시작과 같은 소스 행'에만 적용한다.
+    """
     date_col: dict[str, int] = {
         h: i for i, h in enumerate(header)
         if len(h) == 10 and h[4] == "-" and h[7] == "-"
     }
     target_date_strs = {d.strftime("%Y-%m-%d") for d in target_dates}
 
-    # rows를 (날짜, 채널) → row 인덱스로 빠르게 찾을 수 있게 인덱싱
-    row_index: dict[tuple[str, str], int] = {}
+    # 업로드 행을 (날짜, 채널, 클릭수) → [행 인덱스] 로 인덱싱 (중복 소비용)
+    upload_index: dict[tuple[str, str, str], list[int]] = {}
     for i, r in enumerate(rows):
-        if len(r) >= 5:
-            row_index[(r[0], r[4])] = i
+        if len(r) >= 7:
+            upload_index.setdefault((r[0], r[4], r[6].replace(",", "")), []).append(i)
+
+    def source_cells(r: list[str]) -> dict[str, int]:
+        """소스 행의 클릭이 있는 날짜 → 클릭수."""
+        out = {}
+        for d_str, col in date_col.items():
+            if col < len(r):
+                raw = r[col].replace(",", "").strip()
+                if raw.isdigit() and int(raw) > 0:
+                    out[d_str] = int(raw)
+        return out
 
     # 같은 (캠페인명, 기간)이 여러 줄로 뜨면 집행비용 합산 (분할 정산 통합)
     agg: dict[tuple[str, str], dict] = {}
@@ -317,13 +331,11 @@ def apply_exception_costs(
     for camp in agg.values():
         expected = camp["expected"]
         actual   = camp["actual"]
-        # 집행완료 캠페인의 일별 합을 실제 집행비용에 맞춘다.
         # 집행비용이 0이거나 예상비용과 같으면 보정 불필요 (구간 공식 그대로).
         if actual <= 0 or actual == expected:
             continue
 
-        cname = camp["campaign_name"]
-        product = mapping.get(cname)
+        product = mapping.get(camp["campaign_name"])
         if not product:
             continue
 
@@ -331,83 +343,49 @@ def apply_exception_costs(
             p_start, p_end = _parse_period(camp["period"])
         except Exception:
             continue
+        start_str = p_start.strftime("%Y-%m-%d")
+        end_str   = p_end.strftime("%Y-%m-%d")
 
-        period_dates = _date_range(p_start, p_end)
-        # 대상 날짜 범위와 겹치는 캠페인 날짜만
-        overlap = [d for d in period_dates if d.strftime("%Y-%m-%d") in target_date_strs]
-        if not overlap:
-            continue
-
-        # 이 상품의 소스 행 (채널상세 A열). 같은 채널명이 같은 날 여러 행일 수 있음.
-        product_rows = [r for r in source_rows if len(r) > 1 and r[1].strip() == product]
-        if not product_rows:
-            continue
-        product_channels = {r[0].strip() for r in product_rows if r[0].strip()}
-
-        def upload_idxs_on(d_str: str) -> list[int]:
-            """해당 날짜에 이 상품에 속하는 업로드 행 인덱스 (행 단위, 중복 포함)."""
-            return [i for i, rr in enumerate(rows)
-                    if len(rr) >= 7 and rr[0] == d_str and rr[4] in product_channels]
-
-        def source_cost_on(d_str: str) -> int:
-            """업데이트 범위 밖 날짜: 소스 클릭으로 구간 비용 합산."""
-            col = date_col.get(d_str)
-            if col is None:
-                return 0
-            total = 0
-            for r in product_rows:
-                raw = r[col].replace(",", "").strip() if col < len(r) else ""
-                if raw.isdigit() and int(raw) > 0:
-                    total += calc_cost(int(raw))
-            return total
-
-        def distribute(idxs: list[int], amount: int):
-            """amount를 업로드 행들에 클릭 비율로 분배해 기록 (음수 방지)."""
-            pairs = []
-            for i in idxs:
-                raw = rows[i][6].replace(",", "")
-                clk = int(raw) if raw.lstrip("-").isdigit() else 0
-                pairs.append((i, max(0, clk)))
-            total_clicks = sum(c for _, c in pairs)
-            if total_clicks <= 0:
-                return
-            rem = amount
-            for k, (i, clk) in enumerate(pairs):
-                if k == len(pairs) - 1:
-                    cost = rem
-                else:
-                    cost = round(amount * clk / total_clicks)
-                    rem -= cost
-                rows[i][7] = str(max(0, cost))
-
-        period_strs = [d.strftime("%Y-%m-%d") for d in period_dates]
-
-        if len(period_dates) == 1:
-            # 단일일: 그 날짜 모든 행 합을 집행비용(actual)으로 교체
-            idxs = upload_idxs_on(period_strs[0])
-            if idxs:
-                distribute(idxs, actual)
-
-        else:
-            # 기간: 마지막 날 제외 기본 공식 유지, 마지막 날 = actual - 앞 날 합계
-            last_d_str = period_strs[-1]
-
-            cost_sum = 0
-            for d_str in period_strs[:-1]:
-                if d_str in target_date_strs:
-                    for i in upload_idxs_on(d_str):
-                        raw = rows[i][7].replace(",", "")
-                        if raw.lstrip("-").isdigit():
-                            cost_sum += int(raw)
-                else:
-                    cost_sum += source_cost_on(d_str)
-
-            remainder = max(0, actual - cost_sum)  # 음수 방지
-            if last_d_str not in target_date_strs:
+        # 이 캠페인에 속하는 소스 행: 상품 일치 + 첫 클릭일 == 기간 시작 + 마지막 클릭일 <= 기간 종료
+        # → 같은 상품의 다른 기간 캠페인 행과 분리된다.
+        # 셀 = (날짜, 클릭수, 채널) — 같은 날 여러 행이면 셀도 여러 개.
+        cell_list: list[tuple[str, int, str]] = []
+        for r in source_rows:
+            if len(r) <= 1 or r[1].strip() != product:
                 continue
-            idxs = upload_idxs_on(last_d_str)
+            sc = source_cells(r)
+            if not sc:
+                continue
+            first, last = min(sc), max(sc)
+            if first != start_str or last > end_str:
+                continue
+            ch = r[0].strip()
+            for d_str, clk in sc.items():
+                cell_list.append((d_str, clk, ch))
+        if not cell_list:
+            continue
+
+        last_day = max(d for d, _, _ in cell_list)
+        # 마지막 날 제외 구간 비용 합 (셀별 구간 공식)
+        cost_sum = sum(calc_cost(clk) for d, clk, _ in cell_list if d != last_day)
+        remainder = max(0, actual - cost_sum)
+
+        # 마지막 날 셀들에 remainder를 클릭 비율로 분배 (업데이트 범위 안일 때만)
+        if last_day not in target_date_strs:
+            continue
+        last_cells = [(clk, ch) for d, clk, ch in cell_list if d == last_day]
+        total_clk = sum(clk for clk, _ in last_cells)
+        if total_clk <= 0:
+            continue
+        rem = remainder
+        for k, (clk, ch) in enumerate(last_cells):
+            cost = rem if k == len(last_cells) - 1 else round(remainder * clk / total_clk)
+            if k != len(last_cells) - 1:
+                rem -= cost
+            key = (last_day, ch, str(clk))
+            idxs = upload_index.get(key)
             if idxs:
-                distribute(idxs, remainder)
+                rows[idxs.pop(0)][7] = str(max(0, cost))
 
     return rows
 
