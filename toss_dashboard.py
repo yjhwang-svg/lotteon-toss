@@ -122,6 +122,23 @@ _HERE = Path(__file__).parent
 SPREADSHEET_ID = "18Gzpi_yeYQXbjqChlhm9EHT7z0Gi-65D0NCX7iC3SJ4"
 TARGET_SHEET   = "토스업로드"
 SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit?gid=1288015996#gid=1288015996"
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/triggers/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"
+
+
+def send_slack(text: str) -> None:
+    """슬랙 워크플로우 웹훅으로 메시지 전송 (실패해도 무시)."""
+    import urllib.request
+    import json as _j
+    try:
+        req = urllib.request.Request(
+            SLACK_WEBHOOK_URL,
+            data=_j.dumps({"text": text}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
 
 # ── 세션 스테이트 ─────────────────────────────────────────────────────────────
 for key in ["logs", "result", "error", "running"]:
@@ -272,6 +289,14 @@ if use_toss is not None and not st.session_state.running:
                 result = run_general(start_date, end_date)
         st.session_state.result = result
         st.session_state.logs   = result["logs"]
+
+        # 슬랙 완료 알림
+        dts = result["dates"]
+        label = dts[0] if len(dts) == 1 else f"{dts[0]} ~ {dts[-1]}"
+        mode  = "토스 대시보드 재수집" if result["used_toss"] else "일반 재수집"
+        soje  = len(result["sojaebang"])
+        detail = result["logs"][-1] if result.get("queued") else f"소재행 {soje}개, 삭제 {result['deleted']}개"
+        send_slack(f"🔁 [토스봇] {mode} 완료 — {label}\n{detail}\n📊 {SHEET_URL}")
     except Exception as e:
         st.session_state.error = str(e)
     finally:
