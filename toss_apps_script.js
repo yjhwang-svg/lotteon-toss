@@ -183,7 +183,6 @@ function sendSlackWebhook(result, targetDate) {
     }
   }
 
-  text += "\n\n🔗 재수집: " + STREAMLIT_URL;
 
   var payload = { text: text };
   UrlFetchApp.fetch(SLACK_WEBHOOK_URL, {
@@ -263,7 +262,6 @@ function sendSlackWebhookBatch(result, targetLabel) {
     }
   }
 
-  text += "\n\n🔗 재수집: " + STREAMLIT_URL;
 
   UrlFetchApp.fetch(SLACK_WEBHOOK_URL, {
     method: "post",

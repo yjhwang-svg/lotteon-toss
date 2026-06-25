@@ -304,7 +304,7 @@ if use_toss is not None and not st.session_state.running:
         mode  = "토스 대시보드 재수집" if result["used_toss"] else "일반 재수집"
         soje  = len(result["sojaebang"])
         detail = result["logs"][-1] if result.get("queued") else f"소재행 {soje}개, 삭제 {result['deleted']}개"
-        send_slack(f"🔁 [토스봇] {mode} 완료 — {label}\n{detail}\n📊 {SHEET_URL}")
+        send_slack(f"🔁 [토스봇] {mode} 완료 — {label}\n{detail}")
     except Exception as e:
         st.session_state.error = str(e)
     finally:
