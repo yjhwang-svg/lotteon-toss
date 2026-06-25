@@ -197,7 +197,7 @@ st.markdown("""
 
 # 날짜 선택
 st.markdown(
-    '<p style="font-size:18px;font-weight:700;color:var(--text-color,#191F28);margin:8px 0 16px;">'
+    '<p style="font-size:18px;font-weight:700;margin:8px 0 16px;">'
     '📅 업데이트 기간 설정</p>',
     unsafe_allow_html=True
 )
@@ -215,14 +215,14 @@ if start_date > end_date:
 
 days_count = (end_date - start_date).days + 1
 st.markdown(
-    f'<p style="font-size:13px;color:var(--text-color,#6B7684);opacity:.7;margin-top:4px;margin-bottom:24px;">'
+    f'<p style="font-size:13px;opacity:.65;margin-top:4px;margin-bottom:24px;">'
     f'선택 기간: <b style="color:#5B8DEF">{days_count}일</b> ({start_date} ~ {end_date})</p>',
     unsafe_allow_html=True
 )
 
 # 버튼 영역
 st.markdown(
-    '<p style="font-size:18px;font-weight:700;color:var(--text-color,#191F28);margin:8px 0 16px;">'
+    '<p style="font-size:18px;font-weight:700;margin:8px 0 16px;">'
     '🔄 재수집 방식 선택</p>',
     unsafe_allow_html=True
 )
@@ -244,7 +244,7 @@ with col_b:
     )
 
 st.markdown(
-    '<p style="font-size:12px;color:var(--text-color,#6B7684);opacity:.6;margin-top:8px;margin-bottom:16px;line-height:1.9;">'
+    '<p style="font-size:12px;opacity:.6;margin-top:8px;margin-bottom:16px;line-height:1.9;">'
     '💡 <b>일반</b>: 클릭 &lt; 10,000 → 클릭×10원 / 이상 → 만 단위×10만원<br>'
     '💡 <b>토스</b>: 집행완료 + 집행비용 ≠ 예상비용인 경우 실제 집행비용으로 보정</p>',
     unsafe_allow_html=True
